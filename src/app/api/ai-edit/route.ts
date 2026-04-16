@@ -1,24 +1,21 @@
 import { NextRequest, NextResponse } from "next/server";
 
-const REPLICATE_BASE = "https://api.replicate.com/v1";
+// Gemini 2.5 Flash Image — native image editing model (Nano Banana).
+// Much better at preserving the original image while making targeted edits,
+// compared to SDXL img2img.
 
-function getToken() {
-  return process.env.REPLICATE_API_TOKEN ?? "";
+const GEMINI_MODEL = "gemini-2.5-flash-image-preview";
+const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
+
+function getKey() {
+  return process.env.GEMINI_API_KEY ?? process.env.REPLICATE_API_TOKEN ?? "";
 }
 
-function headers() {
-  return {
-    Authorization: `Bearer ${getToken()}`,
-    "Content-Type": "application/json",
-  };
-}
-
-// POST — create prediction (img2img via SDXL)
 export async function POST(req: NextRequest) {
-  const token = getToken();
-  if (!token) {
+  const key = process.env.GEMINI_API_KEY ?? "";
+  if (!key) {
     return NextResponse.json(
-      { error: "REPLICATE_API_TOKEN not configured" },
+      { error: "GEMINI_API_KEY not configured" },
       { status: 503 },
     );
   }
@@ -28,93 +25,92 @@ export async function POST(req: NextRequest) {
     subject: string;
   };
 
+  // Strip data URL prefix, extract MIME + base64
+  const match = /^data:([^;]+);base64,(.+)$/.exec(image);
+  if (!match) {
+    return NextResponse.json(
+      { error: "Invalid image format" },
+      { status: 400 },
+    );
+  }
+  const [, mimeType, base64Data] = match;
+
   const prompt = [
-    `high quality photograph, exact same image,`,
-    `${subject} wearing a blue baseball cap with $MTONGA text,`,
-    "same pose, same background, same lighting, same framing,",
-    "slightly soften edges of the cap, subtle shadow under cap,",
-    "photorealistic, keep everything identical",
+    `Edit this photo of a ${subject} wearing a blue MTONGA baseball cap.`,
+    "Keep the subject, pose, background, and all details exactly the same.",
+    "Only blend the cap naturally onto the head:",
+    "match lighting, add subtle realistic shadow under the brim,",
+    "soften hard edges so the cap looks physically worn,",
+    "keep the $MTONGA text on the cap readable and intact.",
+    "Do not change the face or identity of the subject.",
   ].join(" ");
 
-  const res = await fetch(`${REPLICATE_BASE}/predictions`, {
-    method: "POST",
-    headers: headers(),
-    body: JSON.stringify({
-      version:
-        "39ed52f2a78e934b3ba6e2a89f5b1c712de7dfea535525255b1aa35c5565e08b",
-      input: {
-        prompt,
-        negative_prompt: [
-          "different subject, different background, different pose,",
-          "changed face, different person, different animal,",
-          "wrong text, extra text, misspelled, watermark,",
-          "cartoon, painting, illustration, low quality, blurry",
-        ].join(" "),
-        image,
-        prompt_strength: 0.08,
-        num_inference_steps: 50,
-        guidance_scale: 15,
-        width: 1024,
-        height: 1024,
+  const body = {
+    contents: [
+      {
+        parts: [
+          { text: prompt },
+          { inlineData: { mimeType, data: base64Data } },
+        ],
       },
-    }),
+    ],
+    generationConfig: {
+      responseModalities: ["IMAGE"],
+    },
+  };
+
+  const res = await fetch(`${GEMINI_URL}?key=${key}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
   });
 
   if (!res.ok) {
-    const body = await res.text();
+    const errorBody = await res.text();
     return NextResponse.json(
-      { error: `Replicate error: ${res.status} ${body}` },
+      { error: `Gemini error: ${res.status} ${errorBody}` },
       { status: 502 },
     );
   }
 
-  const prediction = await res.json();
-  return NextResponse.json({ id: prediction.id, status: prediction.status });
-}
+  const data = await res.json();
 
-// GET — poll prediction status, proxy result image to avoid CORS
-export async function GET(req: NextRequest) {
-  const token = getToken();
-  if (!token) {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const parts = data?.candidates?.[0]?.content?.parts as any[] | undefined;
+  const imagePart = parts?.find((p) => p.inlineData?.data);
+
+  if (!imagePart) {
     return NextResponse.json(
-      { error: "REPLICATE_API_TOKEN not configured" },
-      { status: 503 },
+      {
+        error:
+          data?.candidates?.[0]?.finishReason ??
+          "No image in Gemini response",
+      },
+      { status: 502 },
     );
   }
 
+  const outputMime = imagePart.inlineData.mimeType ?? "image/png";
+  const outputData = imagePart.inlineData.data;
+
+  // Synchronous — return result immediately (no polling needed)
+  return NextResponse.json({
+    id: "sync",
+    status: "succeeded",
+    output: `data:${outputMime};base64,${outputData}`,
+  });
+}
+
+// GET is kept for backwards compatibility with the polling UI.
+// Gemini responds synchronously, so POST already returns the final image;
+// the client will immediately see "succeeded" on the first GET.
+export async function GET(req: NextRequest) {
   const id = req.nextUrl.searchParams.get("id");
   if (!id) {
     return NextResponse.json({ error: "Missing id" }, { status: 400 });
   }
-
-  const res = await fetch(`${REPLICATE_BASE}/predictions/${id}`, {
-    headers: headers(),
-  });
-
-  if (!res.ok) {
-    return NextResponse.json(
-      { error: `Replicate error: ${res.status}` },
-      { status: 502 },
-    );
-  }
-
-  const prediction = await res.json();
-
-  if (prediction.status === "succeeded" && prediction.output?.[0]) {
-    // Proxy the result image as base64 to avoid CORS
-    const imgRes = await fetch(prediction.output[0]);
-    const buffer = await imgRes.arrayBuffer();
-    const base64 = Buffer.from(buffer).toString("base64");
-    const mime = imgRes.headers.get("content-type") ?? "image/png";
-    return NextResponse.json({
-      status: "succeeded",
-      output: `data:${mime};base64,${base64}`,
-    });
-  }
-
-  return NextResponse.json({
-    status: prediction.status,
-    output: null,
-    error: prediction.error ?? null,
-  });
+  return NextResponse.json({ status: "succeeded", output: null });
 }
+
+// Suppress unused warning for fallback helper
+void getKey;

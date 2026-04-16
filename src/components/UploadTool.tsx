@@ -244,8 +244,18 @@ export default function UploadTool() {
         throw new Error(body.error ?? `Server error ${createRes.status}`);
       }
 
-      const { id } = await createRes.json();
+      const firstResp = await createRes.json();
 
+      // Gemini returns the result synchronously
+      if (firstResp.status === "succeeded" && firstResp.output) {
+        const resultImg = await loadImageFromUrl(firstResp.output);
+        setAiEditResult(resultImg);
+        setAiEditStatus("done");
+        return;
+      }
+
+      // Fallback: polling for async providers (Replicate-style)
+      const { id } = firstResp;
       for (let i = 0; i < 60; i++) {
         await sleep(2000);
         const statusRes = await fetch(`/api/ai-edit?id=${id}`);
