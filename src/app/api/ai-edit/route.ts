@@ -1,14 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
 
-// Gemini 2.5 Flash Image — native image editing model (Nano Banana).
-// Much better at preserving the original image while making targeted edits,
-// compared to SDXL img2img.
-
 const GEMINI_MODEL = "gemini-2.5-flash-image";
 const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
 
-function getKey() {
-  return process.env.GEMINI_API_KEY ?? process.env.REPLICATE_API_TOKEN ?? "";
+function splitDataUrl(dataUrl: string) {
+  const match = /^data:([^;]+);base64,(.+)$/.exec(dataUrl);
+  if (!match) return null;
+  return { mimeType: match[1], data: match[2] };
 }
 
 export async function POST(req: NextRequest) {
@@ -20,29 +18,32 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  const { image, subject } = (await req.json()) as {
-    image: string;
+  const { photo, hat, subject } = (await req.json()) as {
+    photo: string;
+    hat: string;
     subject: string;
   };
 
-  // Strip data URL prefix, extract MIME + base64
-  const match = /^data:([^;]+);base64,(.+)$/.exec(image);
-  if (!match) {
+  const photoData = splitDataUrl(photo);
+  const hatData = splitDataUrl(hat);
+  if (!photoData || !hatData) {
     return NextResponse.json(
       { error: "Invalid image format" },
       { status: 400 },
     );
   }
-  const [, mimeType, base64Data] = match;
 
   const prompt = [
-    `Edit this photo of a ${subject} wearing a blue MTONGA baseball cap.`,
-    "Keep the subject, pose, background, and all details exactly the same.",
-    "Only blend the cap naturally onto the head:",
-    "match lighting, add subtle realistic shadow under the brim,",
-    "soften hard edges so the cap looks physically worn,",
-    "keep the $MTONGA text on the cap readable and intact.",
-    "Do not change the face or identity of the subject.",
+    `First image: a photo of a ${subject}.`,
+    "Second image: a blue baseball cap with '$MTONGA' text on it.",
+    "Task: place the blue cap from the second image naturally onto the head of the subject in the first image.",
+    "Requirements:",
+    "- Keep the first image's background, pose, lighting and composition exactly the same.",
+    "- Do not change the subject's face, fur, or identity.",
+    "- Fit the cap to the size and angle of the head realistically.",
+    "- Match the lighting of the scene, add a soft natural shadow under the brim.",
+    "- Keep the '$MTONGA' text on the cap clear and readable, do not rewrite or distort it.",
+    "- Output only the edited photo, nothing else.",
   ].join(" ");
 
   const body = {
@@ -50,7 +51,8 @@ export async function POST(req: NextRequest) {
       {
         parts: [
           { text: prompt },
-          { inlineData: { mimeType, data: base64Data } },
+          { inlineData: { mimeType: photoData.mimeType, data: photoData.data } },
+          { inlineData: { mimeType: hatData.mimeType, data: hatData.data } },
         ],
       },
     ],
@@ -93,7 +95,6 @@ export async function POST(req: NextRequest) {
   const outputMime = imagePart.inlineData.mimeType ?? "image/png";
   const outputData = imagePart.inlineData.data;
 
-  // Synchronous — return result immediately (no polling needed)
   return NextResponse.json({
     id: "sync",
     status: "succeeded",
@@ -101,9 +102,6 @@ export async function POST(req: NextRequest) {
   });
 }
 
-// GET is kept for backwards compatibility with the polling UI.
-// Gemini responds synchronously, so POST already returns the final image;
-// the client will immediately see "succeeded" on the first GET.
 export async function GET(req: NextRequest) {
   const id = req.nextUrl.searchParams.get("id");
   if (!id) {
@@ -111,6 +109,3 @@ export async function GET(req: NextRequest) {
   }
   return NextResponse.json({ status: "succeeded", output: null });
 }
-
-// Suppress unused warning for fallback helper
-void getKey;

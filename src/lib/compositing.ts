@@ -167,6 +167,39 @@ export function createAIInputComposite(
   return c.toDataURL("image/jpeg", 0.88);
 }
 
+/** Render only the photo (with current photo transform) as JPEG data URL. */
+export function createPhotoOnlyDataUrl(
+  size: number,
+  userImg: HTMLImageElement,
+  photo: PhotoTransform,
+): string {
+  const c = document.createElement("canvas");
+  c.width = size;
+  c.height = size;
+  const ctx = c.getContext("2d")!;
+  const { sx, sy, sw, sh } = coverFitCrop(
+    userImg.naturalWidth,
+    userImg.naturalHeight,
+  );
+  const d = size * photo.scale;
+  const dx = (size - d) / 2 + (photo.x / 100) * size;
+  const dy = (size - d) / 2 + (photo.y / 100) * size;
+  ctx.drawImage(userImg, sx, sy, sw, sh, dx, dy, d, d);
+  return c.toDataURL("image/jpeg", 0.9);
+}
+
+/** Render the hat image on a transparent canvas as PNG data URL. */
+export function createHatOnlyDataUrl(
+  hatImg: HTMLImageElement,
+): string {
+  const c = document.createElement("canvas");
+  c.width = hatImg.naturalWidth;
+  c.height = hatImg.naturalHeight;
+  const ctx = c.getContext("2d")!;
+  ctx.drawImage(hatImg, 0, 0);
+  return c.toDataURL("image/png");
+}
+
 export function overlayHatText(
   ctx: CanvasRenderingContext2D,
   size: number,

@@ -23,15 +23,14 @@ import { DEFAULT_HAT, DEFAULT_PHOTO, CANVAS_SIZE } from "@/lib/types";
 import {
   loadHatAssets,
   getHat,
-  getPlainHat,
   type HatAssets,
 } from "@/lib/hat-assets";
 import {
   renderClassic,
   renderSmart,
   autoPositionHat,
-  createAIInputComposite,
-  overlayHatText,
+  createPhotoOnlyDataUrl,
+  createHatOnlyDataUrl,
 } from "@/lib/compositing";
 import {
   smartDetect,
@@ -225,9 +224,8 @@ export default function UploadTool() {
       }
 
       const hatImg = getHat(hatAssets, direction);
-      const composite = createAIInputComposite(
-        CANVAS_SIZE, userImage, hatImg, hat, photo,
-      );
+      const photoUrl = createPhotoOnlyDataUrl(CANVAS_SIZE, userImage, photo);
+      const hatUrl = createHatOnlyDataUrl(hatImg);
 
       let subject = "subject";
       if (det?.kind === "human") subject = "person";
@@ -236,7 +234,7 @@ export default function UploadTool() {
       const createRes = await fetch("/api/ai-edit", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ image: composite, subject }),
+        body: JSON.stringify({ photo: photoUrl, hat: hatUrl, subject }),
       });
 
       if (!createRes.ok) {
