@@ -22,7 +22,8 @@ import type {
 import { DEFAULT_HAT, DEFAULT_PHOTO, CANVAS_SIZE } from "@/lib/types";
 import {
   loadHatAssets,
-  getHat,
+  getHat as getHatFull,
+  getPlainHat,
   type HatAssets,
 } from "@/lib/hat-assets";
 import {
@@ -37,6 +38,13 @@ import {
   computeHumanHatTransform,
   computeAnimalHatTransform,
 } from "@/lib/face-ai";
+
+interface TextOverlay {
+  x: number; // canvas pixels
+  y: number;
+  width: number;
+  rotation: number; // radians
+}
 
 const AI_EDIT_ENABLED =
   process.env.NEXT_PUBLIC_AI_EDIT_ENABLED === "true";
@@ -115,6 +123,7 @@ export default function UploadTool() {
   const [aiEditStatus, setAiEditStatus] = useState<"idle" | "loading" | "done" | "error">("idle");
   const [aiEditResult, setAiEditResult] = useState<HTMLImageElement | null>(null);
   const [aiEditError, setAiEditError] = useState<string | null>(null);
+  const [aiTextOverlay, setAiTextOverlay] = useState<TextOverlay | null>(null);
 
   const [isDragOver, setIsDragOver] = useState(false);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -138,11 +147,29 @@ export default function UploadTool() {
     if (mode === "ai-edit" && aiEditResult && aiEditStatus === "done") {
       ctx.clearRect(0, 0, CANVAS_SIZE, CANVAS_SIZE);
       ctx.drawImage(aiEditResult, 0, 0, CANVAS_SIZE, CANVAS_SIZE);
+
+      if (aiTextOverlay) {
+        const { x, y, width, rotation } = aiTextOverlay;
+        const fontSize = Math.round(width * 0.22);
+        ctx.save();
+        ctx.translate(x, y);
+        ctx.rotate(rotation);
+        ctx.font = `900 ${fontSize}px Arial, Helvetica, sans-serif`;
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.lineJoin = "round";
+        ctx.lineWidth = Math.max(2, fontSize * 0.08);
+        ctx.strokeStyle = "rgba(0,0,0,0.35)";
+        ctx.strokeText("$MTONGA", 0, 0);
+        ctx.fillStyle = "#ffffff";
+        ctx.fillText("$MTONGA", 0, 0);
+        ctx.restore();
+      }
       return;
     }
 
     if (!userImage || !hatAssets) return;
-    const hatImg = getHat(hatAssets, direction);
+    const hatImg = getHatFull(hatAssets, direction);
 
     if (mode === "smart" && smartStatus === "done") {
       renderSmart(ctx, CANVAS_SIZE, userImage, hatImg, hat, photo, faceForRender);
@@ -150,7 +177,7 @@ export default function UploadTool() {
       renderClassic(ctx, CANVAS_SIZE, userImage, hatImg, hat, photo);
     }
   }, [userImage, hatAssets, direction, hat, photo, mode, smartStatus, detection,
-      faceForRender, aiEditResult, aiEditStatus]);
+      faceForRender, aiEditResult, aiEditStatus, aiTextOverlay]);
 
   // ── File handling ──────────────────────────────────────────────────────────
 
@@ -169,6 +196,7 @@ export default function UploadTool() {
       setAiEditResult(null);
       setAiEditStatus("idle");
       setAiEditError(null);
+      setAiTextOverlay(null);
       const autoHat = await autoPositionHat(img, CANVAS_SIZE);
       setHat(autoHat ?? DEFAULT_HAT);
     };
@@ -215,6 +243,7 @@ export default function UploadTool() {
     setAiEditStatus("loading");
     setAiEditError(null);
     setAiEditResult(null);
+    setAiTextOverlay(null);
 
     try {
       let det = detection;
@@ -223,9 +252,9 @@ export default function UploadTool() {
         if (det.kind === "none") setHat(DEFAULT_HAT);
       }
 
-      const hatImg = getHat(hatAssets, direction);
+      const plainHat = getPlainHat(hatAssets, direction);
       const photoUrl = createPhotoOnlyDataUrl(CANVAS_SIZE, userImage, photo);
-      const hatUrl = createHatOnlyDataUrl(hatImg);
+      const hatUrl = createHatOnlyDataUrl(plainHat);
 
       let subject = "subject";
       if (det?.kind === "human") subject = "person";
@@ -248,6 +277,40 @@ export default function UploadTool() {
       if (firstResp.status === "succeeded" && firstResp.output) {
         const resultImg = await loadImageFromUrl(firstResp.output);
         setAiEditResult(resultImg);
+
+        // Detect face on the AI result to place $MTONGA text on the cap
+        const resultDet = await smartDetect(resultImg);
+        if (resultDet.kind === "human") {
+          const f = resultDet.face;
+          const scaleX = CANVAS_SIZE / resultImg.naturalWidth;
+          const scaleY = CANVAS_SIZE / resultImg.naturalHeight;
+          const headW = f.faceWidth * resultImg.naturalWidth * scaleX;
+          const foreheadX = f.foreheadX * resultImg.naturalWidth * scaleX;
+          const foreheadY = f.foreheadY * resultImg.naturalHeight * scaleY;
+          setAiTextOverlay({
+            x: foreheadX,
+            y: foreheadY - headW * 0.35,
+            width: headW * 0.8,
+            rotation: (f.roll * Math.PI) / 180,
+          });
+        } else if (resultDet.kind === "animal") {
+          const a = resultDet.animal;
+          const scaleX = CANVAS_SIZE / resultImg.naturalWidth;
+          const scaleY = CANVAS_SIZE / resultImg.naturalHeight;
+          const headCenterX =
+            (a.bboxX + a.bboxW / 2) * resultImg.naturalWidth * scaleX;
+          const headTop = a.bboxY * resultImg.naturalHeight * scaleY;
+          const headW = a.bboxW * resultImg.naturalWidth * scaleX;
+          setAiTextOverlay({
+            x: headCenterX,
+            y: headTop - headW * 0.1,
+            width: headW * 0.5,
+            rotation: 0,
+          });
+        } else {
+          setAiTextOverlay(null);
+        }
+
         setAiEditStatus("done");
         return;
       }
@@ -302,6 +365,7 @@ export default function UploadTool() {
     setAiEditResult(null);
     setAiEditStatus("idle");
     setAiEditError(null);
+    setAiTextOverlay(null);
   };
 
   const updateHat = (k: string, v: number) => setHat((p) => ({ ...p, [k]: v }));
