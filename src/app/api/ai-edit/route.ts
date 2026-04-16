@@ -4,7 +4,7 @@ import { NextRequest, NextResponse } from "next/server";
 // Much better at preserving the original image while making targeted edits,
 // compared to SDXL img2img.
 
-const GEMINI_MODEL = "gemini-2.5-flash-image-preview";
+const GEMINI_MODEL = "gemini-2.5-flash-image";
 const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
 
 function getKey() {
