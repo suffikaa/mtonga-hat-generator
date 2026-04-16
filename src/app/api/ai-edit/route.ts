@@ -35,8 +35,8 @@ export async function POST(req: NextRequest) {
 
   const prompt = [
     `First image: a photo of a ${subject}.`,
-    "Second image: a plain solid blue baseball cap with no text and no logo.",
-    "Task: place the plain blue cap from the second image naturally onto the head of the subject in the first image.",
+    "Second image: a blue baseball cap with '$MTONGA' text on it.",
+    "Task: place the cap from the second image naturally onto the head of the subject in the first image.",
     "Size and placement requirements:",
     "- The cap must sit ON TOP of the head, not over the face.",
     "- The cap width must be roughly the same as the head width, not wider.",
@@ -46,7 +46,8 @@ export async function POST(req: NextRequest) {
     "- Keep the background, pose, lighting and composition of the first image exactly the same.",
     "- Do not change the subject's face, fur, identity, or proportions.",
     "- Match the lighting and perspective; add a soft natural shadow under the brim.",
-    "- The cap must stay completely plain and solid blue with NO text, NO letters, NO logos, NO writing whatsoever.",
+    "- Keep the '$MTONGA' text on the cap clean and readable exactly as shown in the second image.",
+    "- Do NOT invent or rewrite any other text or slogans on the cap.",
     "- Output only the edited photo, nothing else.",
   ].join(" ");
 
