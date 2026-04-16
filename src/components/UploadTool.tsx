@@ -6,135 +6,41 @@ import {
   Download,
   RotateCcw,
   Image as ImageIcon,
+  Wand2,
+  Loader2,
+  Sparkles,
 } from "lucide-react";
 
-// ── Types ────────────────────────────────────────────────────────────────────
+import type {
+  HatTransform,
+  PhotoTransform,
+  HatDirection,
+  ComposerMode,
+  FaceAnalysis,
+  DetectionResult,
+} from "@/lib/types";
+import { DEFAULT_HAT, DEFAULT_PHOTO, CANVAS_SIZE } from "@/lib/types";
+import {
+  loadHatAssets,
+  getHat,
+  getPlainHat,
+  type HatAssets,
+} from "@/lib/hat-assets";
+import {
+  renderClassic,
+  renderSmart,
+  autoPositionHat,
+  createAIInputComposite,
+  overlayHatText,
+} from "@/lib/compositing";
+import {
+  smartDetect,
+  computeHumanHatTransform,
+  computeAnimalHatTransform,
+} from "@/lib/face-ai";
 
-export interface HatTransform {
-  x: number;
-  y: number;
-  scale: number;
-  rotation: number;
-}
-
-export interface PhotoTransform {
-  scale: number;
-  x: number;
-  y: number;
-}
-
-const DEFAULT_HAT: HatTransform = { x: 0, y: 0, scale: 0.55, rotation: 0 };
-const DEFAULT_PHOTO: PhotoTransform = { scale: 1, x: 0, y: 0 };
-
-const HAT_SRC = "/hat.png";
-const CANVAS_SIZE = 1024;
-
-// ── Helpers ──────────────────────────────────────────────────────────────────
-
-function coverFitCrop(iw: number, ih: number) {
-  let sx = 0,
-    sy = 0,
-    sw = iw,
-    sh = ih;
-  if (iw > ih) {
-    sx = (iw - ih) / 2;
-    sw = ih;
-  } else {
-    sy = (ih - iw) / 2;
-    sh = iw;
-  }
-  return { sx, sy, sw, sh };
-}
-
-// ── Rendering ────────────────────────────────────────────────────────────────
-// Single source of truth for both preview and PNG export.
-
-export function renderComposite(
-  ctx: CanvasRenderingContext2D,
-  size: number,
-  userImg: HTMLImageElement,
-  hatImg: HTMLImageElement,
-  hat: HatTransform,
-  photo: PhotoTransform,
-) {
-  ctx.clearRect(0, 0, size, size);
-
-  // 1. Photo layer — cover-fit + user transform
-  const { sx, sy, sw, sh } = coverFitCrop(
-    userImg.naturalWidth,
-    userImg.naturalHeight,
-  );
-  const drawSize = size * photo.scale;
-  const drawX = (size - drawSize) / 2 + (photo.x / 100) * size;
-  const drawY = (size - drawSize) / 2 + (photo.y / 100) * size;
-  ctx.drawImage(userImg, sx, sy, sw, sh, drawX, drawY, drawSize, drawSize);
-
-  // 2. Hat layer — preserves original PNG proportions and transparency
-  const hatW = size * hat.scale;
-  const hatH = hatW * (hatImg.naturalHeight / hatImg.naturalWidth);
-  const cx = size / 2 + (hat.x / 100) * size;
-  const cy = size * 0.22 + (hat.y / 100) * size;
-
-  ctx.save();
-  ctx.translate(cx, cy);
-  ctx.rotate((hat.rotation * Math.PI) / 180);
-  ctx.drawImage(hatImg, -hatW / 2, -hatH / 2, hatW, hatH);
-  ctx.restore();
-}
-
-// ── Face detection ───────────────────────────────────────────────────────────
-// Uses the browser-native Shape Detection API (Chromium).
-// Falls back to defaults silently on unsupported browsers.
-
-async function autoPositionHat(
-  img: HTMLImageElement,
-  canvasSize: number,
-): Promise<HatTransform | null> {
-  if (typeof window === "undefined" || !("FaceDetector" in window))
-    return null;
-
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const detector = new (window as any).FaceDetector();
-    const faces = await detector.detect(img);
-    if (!faces.length) return null;
-
-    // Pick the largest face
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const face = faces.reduce((a: any, b: any) =>
-      a.boundingBox.width * a.boundingBox.height >
-      b.boundingBox.width * b.boundingBox.height
-        ? a
-        : b,
-    );
-    const bb = face.boundingBox;
-
-    // Map face bbox from original-image pixels → canvas pixels
-    const { sx, sy, sw, sh } = coverFitCrop(
-      img.naturalWidth,
-      img.naturalHeight,
-    );
-    const fX = ((bb.x - sx) / sw) * canvasSize;
-    const fY = ((bb.y - sy) / sh) * canvasSize;
-    const fW = (bb.width / sw) * canvasSize;
-    const fH = (bb.height / sh) * canvasSize;
-
-    // Hat should sit on top of the head, not on the face center
-    const hatCenterX = fX + fW / 2;
-    const hatCenterY = fY - fH * 0.15;
-    const hatScale = Math.max(0.15, Math.min(1.2, (fW * 1.4) / canvasSize));
-
-    // Reverse-engineer HatTransform from absolute canvas position
-    return {
-      x: ((hatCenterX - canvasSize / 2) / canvasSize) * 100,
-      y: ((hatCenterY - canvasSize * 0.22) / canvasSize) * 100,
-      scale: hatScale,
-      rotation: 0,
-    };
-  } catch {
-    return null;
-  }
-}
+const AI_EDIT_ENABLED =
+  process.env.NEXT_PUBLIC_AI_EDIT_ENABLED === "true";
 
 // ── Slider config ────────────────────────────────────────────────────────────
 
@@ -144,137 +50,112 @@ interface SliderCfg {
   min: number;
   max: number;
   step: number;
-  format: (v: number) => string;
+  fmt: (v: number) => string;
 }
 
 const PHOTO_SLIDERS: SliderCfg[] = [
-  {
-    key: "scale",
-    label: "Zoom",
-    min: 0.5,
-    max: 3,
-    step: 0.01,
-    format: (v) => `${Math.round(v * 100)}%`,
-  },
-  {
-    key: "x",
-    label: "X Offset",
-    min: -50,
-    max: 50,
-    step: 1,
-    format: (v) => `${v > 0 ? "+" : ""}${v}`,
-  },
-  {
-    key: "y",
-    label: "Y Offset",
-    min: -50,
-    max: 50,
-    step: 1,
-    format: (v) => `${v > 0 ? "+" : ""}${v}`,
-  },
+  { key: "scale", label: "Zoom", min: 0.5, max: 3, step: 0.01, fmt: (v) => `${Math.round(v * 100)}%` },
+  { key: "x", label: "X Offset", min: -50, max: 50, step: 1, fmt: (v) => `${v > 0 ? "+" : ""}${v}` },
+  { key: "y", label: "Y Offset", min: -50, max: 50, step: 1, fmt: (v) => `${v > 0 ? "+" : ""}${v}` },
 ];
 
 const HAT_SLIDERS: SliderCfg[] = [
-  {
-    key: "scale",
-    label: "Size",
-    min: 0.1,
-    max: 1.5,
-    step: 0.01,
-    format: (v) => `${Math.round(v * 100)}%`,
-  },
-  {
-    key: "rotation",
-    label: "Rotation",
-    min: -180,
-    max: 180,
-    step: 1,
-    format: (v) => `${v}°`,
-  },
-  {
-    key: "x",
-    label: "X Offset",
-    min: -50,
-    max: 50,
-    step: 1,
-    format: (v) => `${v > 0 ? "+" : ""}${v}`,
-  },
-  {
-    key: "y",
-    label: "Y Offset",
-    min: -40,
-    max: 60,
-    step: 1,
-    format: (v) => `${v > 0 ? "+" : ""}${v}`,
-  },
+  { key: "scale", label: "Size", min: 0.1, max: 1.5, step: 0.01, fmt: (v) => `${Math.round(v * 100)}%` },
+  { key: "rotation", label: "Rotation", min: -180, max: 180, step: 1, fmt: (v) => `${v}°` },
+  { key: "x", label: "X Offset", min: -50, max: 50, step: 1, fmt: (v) => `${v > 0 ? "+" : ""}${v}` },
+  { key: "y", label: "Y Offset", min: -40, max: 60, step: 1, fmt: (v) => `${v > 0 ? "+" : ""}${v}` },
 ];
 
-// ── Reusable slider row ──────────────────────────────────────────────────────
-
-function SliderRow({
-  cfg,
-  value,
-  disabled,
-  onChange,
-}: {
-  cfg: SliderCfg;
-  value: number;
-  disabled: boolean;
-  onChange: (v: number) => void;
+function SliderRow({ cfg, value, disabled, onChange }: {
+  cfg: SliderCfg; value: number; disabled: boolean; onChange: (v: number) => void;
 }) {
   return (
     <div className="space-y-1.5">
       <div className="flex justify-between text-xs text-slate-400">
         <span>{cfg.label}</span>
-        <span className="tabular-nums">{cfg.format(value)}</span>
+        <span className="tabular-nums">{cfg.fmt(value)}</span>
       </div>
-      <input
-        type="range"
-        className="hat-slider"
-        disabled={disabled}
-        min={cfg.min}
-        max={cfg.max}
-        step={cfg.step}
-        value={value}
-        onChange={(e) => onChange(Number(e.target.value))}
-      />
+      <input type="range" className="hat-slider" disabled={disabled}
+        min={cfg.min} max={cfg.max} step={cfg.step} value={value}
+        onChange={(e) => onChange(Number(e.target.value))} />
     </div>
   );
+}
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+function loadImageFromUrl(url: string): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.crossOrigin = "anonymous";
+    img.onload = () => resolve(img);
+    img.onerror = reject;
+    img.src = url;
+  });
+}
+
+function sleep(ms: number) {
+  return new Promise((r) => setTimeout(r, ms));
 }
 
 // ── Component ────────────────────────────────────────────────────────────────
 
 export default function UploadTool() {
   const [userImage, setUserImage] = useState<HTMLImageElement | null>(null);
-  const [hatImage, setHatImage] = useState<HTMLImageElement | null>(null);
+  const [hatAssets, setHatAssets] = useState<HatAssets | null>(null);
   const [hat, setHat] = useState<HatTransform>(DEFAULT_HAT);
   const [photo, setPhoto] = useState<PhotoTransform>(DEFAULT_PHOTO);
-  const [isDragOver, setIsDragOver] = useState(false);
+  const [direction, setDirection] = useState<HatDirection>("left");
+  const [mode, setMode] = useState<ComposerMode>("classic");
 
+  // Smart Fit
+  const [detection, setDetection] = useState<DetectionResult | null>(null);
+  const [smartStatus, setSmartStatus] = useState<"idle" | "loading" | "done" | "error">("idle");
+
+  // AI Edit
+  const [aiEditStatus, setAiEditStatus] = useState<"idle" | "loading" | "done" | "error">("idle");
+  const [aiEditResult, setAiEditResult] = useState<HTMLImageElement | null>(null);
+  const [aiEditError, setAiEditError] = useState<string | null>(null);
+
+  const [isDragOver, setIsDragOver] = useState(false);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const isReady = !!(userImage && hatImage);
+  const isReady = !!(userImage && hatAssets);
+  const faceForRender: FaceAnalysis | null =
+    mode === "smart" && smartStatus === "done" && detection?.kind === "human"
+      ? detection.face : null;
 
-  // Load hat asset once
-  useEffect(() => {
-    const img = new Image();
-    img.src = HAT_SRC;
-    img.onload = () => setHatImage(img);
-  }, []);
+  useEffect(() => { loadHatAssets().then(setHatAssets); }, []);
 
-  // Re-render canvas on any change
+  // ── Canvas rendering ───────────────────────────────────────────────────────
+
   useEffect(() => {
     const canvas = canvasRef.current;
-    if (!canvas || !userImage || !hatImage) return;
+    if (!canvas) return;
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
-    renderComposite(ctx, CANVAS_SIZE, userImage, hatImage, hat, photo);
-  }, [userImage, hatImage, hat, photo]);
+
+    if (mode === "ai-edit" && aiEditResult && aiEditStatus === "done") {
+      ctx.clearRect(0, 0, CANVAS_SIZE, CANVAS_SIZE);
+      ctx.drawImage(aiEditResult, 0, 0, CANVAS_SIZE, CANVAS_SIZE);
+      return;
+    }
+
+    if (!userImage || !hatAssets) return;
+    const hatImg = getHat(hatAssets, direction);
+
+    if (mode === "smart" && smartStatus === "done") {
+      renderSmart(ctx, CANVAS_SIZE, userImage, hatImg, hat, photo, faceForRender);
+    } else {
+      renderClassic(ctx, CANVAS_SIZE, userImage, hatImg, hat, photo);
+    }
+  }, [userImage, hatAssets, direction, hat, photo, mode, smartStatus, detection,
+      faceForRender, aiEditResult, aiEditStatus]);
 
   // ── File handling ──────────────────────────────────────────────────────────
 
-  const loadImage = useCallback((file: File) => {
+  const loadImageFile = useCallback((file: File) => {
     if (!file.type.startsWith("image/")) return;
     const url = URL.createObjectURL(file);
     const img = new Image();
@@ -284,7 +165,11 @@ export default function UploadTool() {
         return img;
       });
       setPhoto(DEFAULT_PHOTO);
-
+      setDetection(null);
+      setSmartStatus("idle");
+      setAiEditResult(null);
+      setAiEditStatus("idle");
+      setAiEditError(null);
       const autoHat = await autoPositionHat(img, CANVAS_SIZE);
       setHat(autoHat ?? DEFAULT_HAT);
     };
@@ -293,23 +178,95 @@ export default function UploadTool() {
 
   const onFileInput = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (file) loadImage(file);
+    if (file) loadImageFile(file);
     e.target.value = "";
   };
-
   const onDrop = (e: React.DragEvent) => {
-    e.preventDefault();
-    setIsDragOver(false);
+    e.preventDefault(); setIsDragOver(false);
     const file = e.dataTransfer.files[0];
-    if (file) loadImage(file);
+    if (file) loadImageFile(file);
   };
-
-  const onDragOver = (e: React.DragEvent) => {
-    e.preventDefault();
-    setIsDragOver(true);
-  };
-
+  const onDragOver = (e: React.DragEvent) => { e.preventDefault(); setIsDragOver(true); };
   const onDragLeave = () => setIsDragOver(false);
+
+  // ── Smart Fit ──────────────────────────────────────────────────────────────
+
+  const runSmartDetect = useCallback(async (img: HTMLImageElement) => {
+    const result = await smartDetect(img);
+    setDetection(result);
+    if (result.kind === "human") {
+      setHat(computeHumanHatTransform(result.face, img.naturalWidth, img.naturalHeight, CANVAS_SIZE));
+    } else if (result.kind === "animal") {
+      setHat(computeAnimalHatTransform(result.animal, img.naturalWidth, img.naturalHeight, CANVAS_SIZE));
+    }
+    return result;
+  }, []);
+
+  const handleSmartFit = async () => {
+    if (!userImage) return;
+    setSmartStatus("loading");
+    const result = await runSmartDetect(userImage);
+    setSmartStatus(result.kind === "none" ? "error" : "done");
+  };
+
+  // ── AI Edit ────────────────────────────────────────────────────────────────
+
+  const handleAIEdit = async () => {
+    if (!userImage || !hatAssets) return;
+    setAiEditStatus("loading");
+    setAiEditError(null);
+    setAiEditResult(null);
+
+    try {
+      let det = detection;
+      if (!det || det.kind === "none") {
+        det = await runSmartDetect(userImage);
+        if (det.kind === "none") setHat(DEFAULT_HAT);
+      }
+
+      const hatImg = getHat(hatAssets, direction);
+      const composite = createAIInputComposite(
+        CANVAS_SIZE, userImage, hatImg, hat, photo,
+      );
+
+      let subject = "subject";
+      if (det?.kind === "human") subject = "person";
+      else if (det?.kind === "animal") subject = det.animal.className;
+
+      const createRes = await fetch("/api/ai-edit", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ image: composite, subject }),
+      });
+
+      if (!createRes.ok) {
+        const body = await createRes.json().catch(() => ({ error: "Request failed" }));
+        throw new Error(body.error ?? `Server error ${createRes.status}`);
+      }
+
+      const { id } = await createRes.json();
+
+      for (let i = 0; i < 60; i++) {
+        await sleep(2000);
+        const statusRes = await fetch(`/api/ai-edit?id=${id}`);
+        const pred = await statusRes.json();
+
+        if (pred.status === "succeeded" && pred.output) {
+          const resultImg = await loadImageFromUrl(pred.output);
+          setAiEditResult(resultImg);
+          setAiEditStatus("done");
+          return;
+        }
+        if (pred.status === "failed" || pred.status === "canceled") {
+          throw new Error(pred.error ?? "Generation failed");
+        }
+      }
+      throw new Error("Generation timed out");
+    } catch (err) {
+      setAiEditError(err instanceof Error ? err.message : "Unknown error");
+      setAiEditStatus("error");
+    }
+  };
 
   // ── Actions ────────────────────────────────────────────────────────────────
 
@@ -332,149 +289,234 @@ export default function UploadTool() {
     setUserImage(null);
     setHat(DEFAULT_HAT);
     setPhoto(DEFAULT_PHOTO);
+    setDetection(null);
+    setSmartStatus("idle");
+    setAiEditResult(null);
+    setAiEditStatus("idle");
+    setAiEditError(null);
   };
 
-  const updateHat = (key: string, v: number) =>
-    setHat((prev) => ({ ...prev, [key]: v }));
+  const updateHat = (k: string, v: number) => setHat((p) => ({ ...p, [k]: v }));
+  const updatePhoto = (k: string, v: number) => setPhoto((p) => ({ ...p, [k]: v }));
 
-  const updatePhoto = (key: string, v: number) =>
-    setPhoto((prev) => ({ ...prev, [key]: v }));
+  // ── Smart Fit status line ──────────────────────────────────────────────────
+
+  const smartMsg = (() => {
+    if (smartStatus === "error")
+      return { t: "No face or animal detected. Use manual controls.", c: "text-amber-400/80" };
+    if (smartStatus !== "done" || !detection) return null;
+    if (detection.kind === "human")
+      return { t: "Face detected. Hat placed with tilt & perspective.", c: "text-emerald-400/70" };
+    if (detection.kind === "animal") {
+      const name = detection.animal.className.charAt(0).toUpperCase() + detection.animal.className.slice(1);
+      return { t: `${name} detected. Hat placed on head area.`, c: "text-emerald-400/70" };
+    }
+    return null;
+  })();
 
   // ── Render ─────────────────────────────────────────────────────────────────
 
   return (
     <section id="generator" className="py-24 w-full max-w-5xl mx-auto">
-      <input
-        ref={fileInputRef}
-        type="file"
-        accept="image/*"
-        onChange={onFileInput}
-        className="hidden"
-      />
+      <input ref={fileInputRef} type="file" accept="image/*"
+        onChange={onFileInput} className="hidden" />
 
       <div className="text-center mb-12">
         <h2 className="text-3xl md:text-4xl font-bold mb-4">
           Generate Your MTONGA Identity
         </h2>
-        <p className="text-slate-400">
-          Upload your PFP. We&apos;ll handle the rest.
-        </p>
+        <p className="text-slate-400">Upload your PFP. We&apos;ll handle the rest.</p>
       </div>
 
       <div className="bg-slate-900/50 backdrop-blur-xl border border-slate-800/80 rounded-3xl p-6 md:p-10 glow-box">
         <div className="flex flex-col md:flex-row gap-10">
-          {/* ── Preview ───────────────────────────────────────────── */}
+
+          {/* ── Preview ─────────────────────────────────────────── */}
           <div
             className={`flex-1 aspect-square bg-slate-950 rounded-2xl border flex items-center justify-center relative overflow-hidden transition-colors cursor-pointer ${
-              isDragOver
-                ? "border-blue-500 bg-blue-950/20"
-                : "border-slate-800"
+              isDragOver ? "border-blue-500 bg-blue-950/20" : "border-slate-800"
             }`}
-            onDrop={onDrop}
-            onDragOver={onDragOver}
-            onDragLeave={onDragLeave}
+            onDrop={onDrop} onDragOver={onDragOver} onDragLeave={onDragLeave}
             onClick={() => !userImage && fileInputRef.current?.click()}
           >
             {!userImage && (
               <div className="text-center p-6 text-slate-500 pointer-events-none">
                 <ImageIcon className="w-16 h-16 mx-auto mb-4 opacity-50" />
                 <p className="font-medium">
-                  {isDragOver
-                    ? "Drop your image"
-                    : "Drag and drop your image here"}
+                  {isDragOver ? "Drop your image" : "Drag and drop your image here"}
                 </p>
                 <p className="text-sm mt-2">or click to browse</p>
               </div>
             )}
-
-            <canvas
-              ref={canvasRef}
-              width={CANVAS_SIZE}
-              height={CANVAS_SIZE}
-              className={`absolute inset-0 w-full h-full ${
-                userImage ? "block" : "hidden"
-              }`}
-            />
-
+            <canvas ref={canvasRef} width={CANVAS_SIZE} height={CANVAS_SIZE}
+              className={`absolute inset-0 w-full h-full ${userImage ? "block" : "hidden"}`} />
             {userImage && (
               <div className="absolute inset-0 ring-4 ring-inset ring-blue-500/20 rounded-2xl pointer-events-none" />
             )}
           </div>
 
-          {/* ── Controls ──────────────────────────────────────────── */}
+          {/* ── Controls ────────────────────────────────────────── */}
           <div className="w-full md:w-80 flex flex-col justify-start space-y-5">
+
+            {/* Mode selector */}
+            <div className="space-y-2">
+              {/* Primary mode */}
+              <button onClick={() => setMode("classic")}
+                className={`w-full py-3 rounded-xl text-sm font-bold transition-all ${
+                  mode === "classic"
+                    ? "bg-slate-700 text-white ring-2 ring-slate-600"
+                    : "bg-slate-800/40 text-slate-400 hover:text-slate-300 hover:bg-slate-800/60"
+                }`}>
+                Classic
+              </button>
+
+              {/* Beta modes */}
+              <div className="flex gap-2">
+                <button onClick={() => setMode("smart")}
+                  className={`flex-1 py-2 rounded-lg text-xs font-medium transition-all flex items-center justify-center gap-1 ${
+                    mode === "smart"
+                      ? "bg-blue-600 text-white shadow-sm"
+                      : "bg-slate-800/40 text-slate-500 hover:text-slate-300"
+                  }`}>
+                  <Wand2 className="w-3 h-3" />Smart Fit
+                  <span className="text-[10px] opacity-60">β</span>
+                </button>
+                {AI_EDIT_ENABLED && (
+                  <button onClick={() => setMode("ai-edit")}
+                    className={`flex-1 py-2 rounded-lg text-xs font-medium transition-all flex items-center justify-center gap-1 ${
+                      mode === "ai-edit"
+                        ? "bg-violet-600 text-white shadow-sm"
+                        : "bg-slate-800/40 text-slate-500 hover:text-slate-300"
+                    }`}>
+                    <Sparkles className="w-3 h-3" />AI Edit
+                    <span className="text-[10px] opacity-60">β</span>
+                  </button>
+                )}
+              </div>
+            </div>
+
             {/* Step 1 — Upload */}
             <div className="space-y-3">
-              <span className="text-sm font-semibold text-slate-300 uppercase tracking-wider">
-                Step 1
-              </span>
-              <button
-                onClick={() => fileInputRef.current?.click()}
-                className="w-full flex items-center justify-center gap-2 py-4 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-xl transition-all font-medium"
-              >
+              <span className="text-sm font-semibold text-slate-300 uppercase tracking-wider">Step 1</span>
+              <button onClick={() => fileInputRef.current?.click()}
+                className="w-full flex items-center justify-center gap-2 py-4 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-xl transition-all font-medium">
                 <Upload className="w-5 h-5" />
                 {userImage ? "Replace Image" : "Upload Image"}
               </button>
             </div>
 
-            {/* Step 2 — Adjust */}
+            {/* Hat Direction */}
+            <div className="space-y-2">
+              <span className="text-xs font-semibold text-slate-400 uppercase tracking-widest">Hat Direction</span>
+              <div className="flex gap-2">
+                {(["left", "right"] as const).map((d) => (
+                  <button key={d} onClick={() => setDirection(d)}
+                    className={`flex-1 py-2 rounded-lg text-sm font-medium transition-all ${
+                      direction === d ? "bg-slate-700 text-white" : "bg-slate-800/50 text-slate-500 hover:text-slate-300"
+                    }`}>
+                    {d === "left" ? "\u2190 Left" : "Right \u2192"}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* ── Mode-specific Step 2 ──────────────────────────── */}
             <div className="space-y-4 pt-4 border-t border-slate-800">
-              <span className="text-sm font-semibold text-slate-300 uppercase tracking-wider">
-                Step 2 &mdash; Adjust
-              </span>
 
-              {/* Photo controls */}
-              <p className="text-xs font-semibold text-blue-400 uppercase tracking-widest">
-                Photo
-              </p>
-              {PHOTO_SLIDERS.map((s) => (
-                <SliderRow
-                  key={`photo-${s.key}`}
-                  cfg={s}
-                  value={photo[s.key as keyof PhotoTransform]}
-                  disabled={!isReady}
-                  onChange={(v) => updatePhoto(s.key, v)}
-                />
-              ))}
+              {mode === "ai-edit" && (
+                <>
+                  <span className="text-sm font-semibold text-slate-300 uppercase tracking-wider">
+                    Step 2 &mdash; Generate
+                  </span>
+                  <button disabled={!isReady || aiEditStatus === "loading"}
+                    onClick={handleAIEdit}
+                    className="w-full flex items-center justify-center gap-2 py-4 bg-violet-600/20 hover:bg-violet-600/30 border border-violet-500/30 text-violet-300 rounded-xl transition-all font-medium disabled:opacity-50 disabled:cursor-not-allowed">
+                    {aiEditStatus === "loading" ? (
+                      <><Loader2 className="w-4 h-4 animate-spin" />Generating&hellip;</>
+                    ) : (
+                      <><Sparkles className="w-4 h-4" />{aiEditStatus === "done" ? "Regenerate" : "Generate AI Edit"}</>
+                    )}
+                  </button>
+                  {aiEditStatus === "done" && (
+                    <p className="text-xs text-emerald-400/70 text-center">
+                      AI edit applied. Download below or regenerate.
+                    </p>
+                  )}
+                  {aiEditStatus === "error" && (
+                    <div className="space-y-2">
+                      <p className="text-xs text-amber-400/80 text-center">
+                        {aiEditError ?? "Generation failed."}
+                      </p>
+                      <button onClick={() => setMode("smart")}
+                        className="w-full py-2 text-xs text-blue-400 hover:text-blue-300 transition-colors text-center">
+                        Switch to Smart Fit instead
+                      </button>
+                    </div>
+                  )}
+                  {aiEditStatus === "loading" && (
+                    <p className="text-xs text-slate-500 text-center">
+                      This may take 10–20 seconds&hellip;
+                    </p>
+                  )}
+                </>
+              )}
 
-              {/* Hat controls */}
-              <p className="text-xs font-semibold text-blue-400 uppercase tracking-widest pt-2">
-                Hat
-              </p>
-              {HAT_SLIDERS.map((s) => (
-                <SliderRow
-                  key={`hat-${s.key}`}
-                  cfg={s}
-                  value={hat[s.key as keyof HatTransform]}
-                  disabled={!isReady}
-                  onChange={(v) => updateHat(s.key, v)}
-                />
-              ))}
+              {mode === "smart" && (
+                <>
+                  <span className="text-sm font-semibold text-slate-300 uppercase tracking-wider">
+                    Step 2 &mdash; Adjust
+                  </span>
+                  <div className="space-y-2">
+                    <button disabled={!isReady || smartStatus === "loading"}
+                      onClick={handleSmartFit}
+                      className="w-full flex items-center justify-center gap-2 py-3 bg-blue-600/20 hover:bg-blue-600/30 border border-blue-500/30 text-blue-400 rounded-xl transition-all font-medium disabled:opacity-50 disabled:cursor-not-allowed">
+                      {smartStatus === "loading"
+                        ? <><Loader2 className="w-4 h-4 animate-spin" />Detecting&hellip;</>
+                        : <><Wand2 className="w-4 h-4" />{smartStatus === "done" ? "Re-detect & Fit" : "Auto-fit Hat"}</>}
+                    </button>
+                    {smartMsg && <p className={`text-xs text-center ${smartMsg.c}`}>{smartMsg.t}</p>}
+                  </div>
+                </>
+              )}
+
+              {mode === "classic" && (
+                <span className="text-sm font-semibold text-slate-300 uppercase tracking-wider">
+                  Step 2 &mdash; Adjust
+                </span>
+              )}
+
+              {mode !== "ai-edit" && (
+                <>
+                  <p className="text-xs font-semibold text-blue-400 uppercase tracking-widest">Photo</p>
+                  {PHOTO_SLIDERS.map((s) => (
+                    <SliderRow key={`p-${s.key}`} cfg={s}
+                      value={photo[s.key as keyof PhotoTransform]}
+                      disabled={!isReady} onChange={(v) => updatePhoto(s.key, v)} />
+                  ))}
+                  <p className="text-xs font-semibold text-blue-400 uppercase tracking-widest pt-2">Hat</p>
+                  {HAT_SLIDERS.map((s) => (
+                    <SliderRow key={`h-${s.key}`} cfg={s}
+                      value={hat[s.key as keyof HatTransform]}
+                      disabled={!isReady} onChange={(v) => updateHat(s.key, v)} />
+                  ))}
+                </>
+              )}
             </div>
 
             {/* Step 3 — Download */}
             <div className="space-y-3 pt-4 border-t border-slate-800">
-              <span className="text-sm font-semibold text-slate-300 uppercase tracking-wider">
-                Step 3
-              </span>
-              <button
-                disabled={!isReady}
+              <span className="text-sm font-semibold text-slate-300 uppercase tracking-wider">Step 3</span>
+              <button disabled={!isReady}
                 onClick={handleDownload}
-                className="w-full flex items-center justify-center gap-2 py-4 bg-blue-600 hover:bg-blue-500 text-white rounded-xl transition-all font-bold shadow-[0_0_15px_rgba(37,99,235,0.3)] disabled:opacity-50 disabled:shadow-none disabled:cursor-not-allowed"
-              >
-                <Download className="w-5 h-5" />
-                Download PNG
+                className="w-full flex items-center justify-center gap-2 py-4 bg-blue-600 hover:bg-blue-500 text-white rounded-xl transition-all font-bold shadow-[0_0_15px_rgba(37,99,235,0.3)] disabled:opacity-50 disabled:shadow-none disabled:cursor-not-allowed">
+                <Download className="w-5 h-5" />Download PNG
               </button>
             </div>
 
-            {/* Reset */}
             {userImage && (
-              <button
-                onClick={handleReset}
-                className="w-full flex items-center justify-center gap-2 py-2 text-sm text-slate-500 hover:text-slate-300 transition-colors"
-              >
-                <RotateCcw className="w-4 h-4" />
-                Reset / Try Another Photo
+              <button onClick={handleReset}
+                className="w-full flex items-center justify-center gap-2 py-2 text-sm text-slate-500 hover:text-slate-300 transition-colors">
+                <RotateCcw className="w-4 h-4" />Reset / Try Another Photo
               </button>
             )}
           </div>
