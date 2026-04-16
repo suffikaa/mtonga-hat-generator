@@ -12,7 +12,7 @@ export interface PhotoTransform {
 }
 
 export type HatDirection = "left" | "right";
-export type ComposerMode = "classic" | "smart" | "ai-edit";
+export type ComposerMode = "classic" | "ai-edit";
 
 // ── Detection types ──────────────────────────────────────────────────────────
 

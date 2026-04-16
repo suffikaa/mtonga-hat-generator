@@ -6,9 +6,9 @@ import {
   Download,
   RotateCcw,
   Image as ImageIcon,
-  Wand2,
   Loader2,
   Sparkles,
+  Hand,
 } from "lucide-react";
 
 import type {
@@ -16,30 +16,18 @@ import type {
   PhotoTransform,
   HatDirection,
   ComposerMode,
-  FaceAnalysis,
-  DetectionResult,
 } from "@/lib/types";
 import { DEFAULT_HAT, DEFAULT_PHOTO, CANVAS_SIZE } from "@/lib/types";
-import {
-  loadHatAssets,
-  getHat as getHatFull,
-  type HatAssets,
-} from "@/lib/hat-assets";
+import { loadHatAssets, getHat, type HatAssets } from "@/lib/hat-assets";
 import {
   renderClassic,
-  renderSmart,
   autoPositionHat,
   createPhotoOnlyDataUrl,
   createHatOnlyDataUrl,
 } from "@/lib/compositing";
-import {
-  smartDetect,
-  computeHumanHatTransform,
-  computeAnimalHatTransform,
-} from "@/lib/face-ai";
+import { smartDetect } from "@/lib/face-ai";
 
-const AI_EDIT_ENABLED =
-  process.env.NEXT_PUBLIC_AI_EDIT_ENABLED === "true";
+const AI_EDIT_ENABLED = process.env.NEXT_PUBLIC_AI_EDIT_ENABLED === "true";
 
 // ── Slider config ────────────────────────────────────────────────────────────
 
@@ -107,11 +95,6 @@ export default function UploadTool() {
   const [direction, setDirection] = useState<HatDirection>("left");
   const [mode, setMode] = useState<ComposerMode>("classic");
 
-  // Smart Fit
-  const [detection, setDetection] = useState<DetectionResult | null>(null);
-  const [smartStatus, setSmartStatus] = useState<"idle" | "loading" | "done" | "error">("idle");
-
-  // AI Edit
   const [aiEditStatus, setAiEditStatus] = useState<"idle" | "loading" | "done" | "error">("idle");
   const [aiEditResult, setAiEditResult] = useState<HTMLImageElement | null>(null);
   const [aiEditError, setAiEditError] = useState<string | null>(null);
@@ -121,9 +104,6 @@ export default function UploadTool() {
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const isReady = !!(userImage && hatAssets);
-  const faceForRender: FaceAnalysis | null =
-    mode === "smart" && smartStatus === "done" && detection?.kind === "human"
-      ? detection.face : null;
 
   useEffect(() => { loadHatAssets().then(setHatAssets); }, []);
 
@@ -142,15 +122,9 @@ export default function UploadTool() {
     }
 
     if (!userImage || !hatAssets) return;
-    const hatImg = getHatFull(hatAssets, direction);
-
-    if (mode === "smart" && smartStatus === "done") {
-      renderSmart(ctx, CANVAS_SIZE, userImage, hatImg, hat, photo, faceForRender);
-    } else {
-      renderClassic(ctx, CANVAS_SIZE, userImage, hatImg, hat, photo);
-    }
-  }, [userImage, hatAssets, direction, hat, photo, mode, smartStatus, detection,
-      faceForRender, aiEditResult, aiEditStatus]);
+    const hatImg = getHat(hatAssets, direction);
+    renderClassic(ctx, CANVAS_SIZE, userImage, hatImg, hat, photo);
+  }, [userImage, hatAssets, direction, hat, photo, mode, aiEditResult, aiEditStatus]);
 
   // ── File handling ──────────────────────────────────────────────────────────
 
@@ -164,8 +138,6 @@ export default function UploadTool() {
         return img;
       });
       setPhoto(DEFAULT_PHOTO);
-      setDetection(null);
-      setSmartStatus("idle");
       setAiEditResult(null);
       setAiEditStatus("idle");
       setAiEditError(null);
@@ -188,26 +160,6 @@ export default function UploadTool() {
   const onDragOver = (e: React.DragEvent) => { e.preventDefault(); setIsDragOver(true); };
   const onDragLeave = () => setIsDragOver(false);
 
-  // ── Smart Fit ──────────────────────────────────────────────────────────────
-
-  const runSmartDetect = useCallback(async (img: HTMLImageElement) => {
-    const result = await smartDetect(img);
-    setDetection(result);
-    if (result.kind === "human") {
-      setHat(computeHumanHatTransform(result.face, img.naturalWidth, img.naturalHeight, CANVAS_SIZE));
-    } else if (result.kind === "animal") {
-      setHat(computeAnimalHatTransform(result.animal, img.naturalWidth, img.naturalHeight, CANVAS_SIZE));
-    }
-    return result;
-  }, []);
-
-  const handleSmartFit = async () => {
-    if (!userImage) return;
-    setSmartStatus("loading");
-    const result = await runSmartDetect(userImage);
-    setSmartStatus(result.kind === "none" ? "error" : "done");
-  };
-
   // ── AI Edit ────────────────────────────────────────────────────────────────
 
   const handleAIEdit = async () => {
@@ -217,19 +169,15 @@ export default function UploadTool() {
     setAiEditResult(null);
 
     try {
-      let det = detection;
-      if (!det || det.kind === "none") {
-        det = await runSmartDetect(userImage);
-        if (det.kind === "none") setHat(DEFAULT_HAT);
-      }
+      // Use detection only to resolve a subject label for the prompt
+      const det = await smartDetect(userImage);
+      let subject = "subject";
+      if (det.kind === "human") subject = "person";
+      else if (det.kind === "animal") subject = det.animal.className;
 
-      const hatImg = getHatFull(hatAssets, direction);
+      const hatImg = getHat(hatAssets, direction);
       const photoUrl = createPhotoOnlyDataUrl(CANVAS_SIZE, userImage, photo);
       const hatUrl = createHatOnlyDataUrl(hatImg);
-
-      let subject = "subject";
-      if (det?.kind === "human") subject = "person";
-      else if (det?.kind === "animal") subject = det.animal.className;
 
       const createRes = await fetch("/api/ai-edit", {
         method: "POST",
@@ -244,7 +192,6 @@ export default function UploadTool() {
 
       const firstResp = await createRes.json();
 
-      // Gemini returns the result synchronously
       if (firstResp.status === "succeeded" && firstResp.output) {
         const resultImg = await loadImageFromUrl(firstResp.output);
         setAiEditResult(resultImg);
@@ -252,7 +199,7 @@ export default function UploadTool() {
         return;
       }
 
-      // Fallback: polling for async providers (Replicate-style)
+      // Fallback polling for async providers
       const { id } = firstResp;
       for (let i = 0; i < 60; i++) {
         await sleep(2000);
@@ -297,8 +244,6 @@ export default function UploadTool() {
     setUserImage(null);
     setHat(DEFAULT_HAT);
     setPhoto(DEFAULT_PHOTO);
-    setDetection(null);
-    setSmartStatus("idle");
     setAiEditResult(null);
     setAiEditStatus("idle");
     setAiEditError(null);
@@ -306,21 +251,6 @@ export default function UploadTool() {
 
   const updateHat = (k: string, v: number) => setHat((p) => ({ ...p, [k]: v }));
   const updatePhoto = (k: string, v: number) => setPhoto((p) => ({ ...p, [k]: v }));
-
-  // ── Smart Fit status line ──────────────────────────────────────────────────
-
-  const smartMsg = (() => {
-    if (smartStatus === "error")
-      return { t: "No face or animal detected. Use manual controls.", c: "text-amber-400/80" };
-    if (smartStatus !== "done" || !detection) return null;
-    if (detection.kind === "human")
-      return { t: "Face detected. Hat placed with tilt & perspective.", c: "text-emerald-400/70" };
-    if (detection.kind === "animal") {
-      const name = detection.animal.className.charAt(0).toUpperCase() + detection.animal.className.slice(1);
-      return { t: `${name} detected. Hat placed on head area.`, c: "text-emerald-400/70" };
-    }
-    return null;
-  })();
 
   // ── Render ─────────────────────────────────────────────────────────────────
 
@@ -364,87 +294,98 @@ export default function UploadTool() {
           </div>
 
           {/* ── Controls ────────────────────────────────────────── */}
-          <div className="w-full md:w-80 flex flex-col justify-start space-y-5">
+          <div className="w-full md:w-80 flex flex-col justify-start space-y-6">
 
-            {/* Mode selector */}
-            <div className="space-y-2">
-              {/* Primary mode */}
-              <button onClick={() => setMode("classic")}
-                className={`w-full py-3 rounded-xl text-sm font-bold transition-all ${
+            {/* Mode selector — segmented control */}
+            <div className="relative flex bg-slate-800/40 rounded-xl p-1 border border-slate-800">
+              {/* Sliding indicator */}
+              <div
+                className={`absolute top-1 bottom-1 rounded-lg transition-all duration-300 ease-out ${
                   mode === "classic"
-                    ? "bg-slate-700 text-white ring-2 ring-slate-600"
-                    : "bg-slate-800/40 text-slate-400 hover:text-slate-300 hover:bg-slate-800/60"
-                }`}>
+                    ? "bg-slate-700 shadow-lg shadow-slate-900/30"
+                    : "bg-gradient-to-r from-blue-600 to-violet-600 shadow-lg shadow-violet-900/40"
+                }`}
+                style={{
+                  width: AI_EDIT_ENABLED ? "calc(50% - 4px)" : "calc(100% - 8px)",
+                  left: mode === "classic" ? "4px" : "calc(50% + 0px)",
+                }}
+              />
+              <button
+                onClick={() => setMode("classic")}
+                className={`relative flex-1 py-2.5 rounded-lg text-sm font-semibold transition-colors flex items-center justify-center gap-2 ${
+                  mode === "classic" ? "text-white" : "text-slate-400 hover:text-slate-300"
+                }`}
+              >
+                <Hand className="w-4 h-4" />
                 Classic
               </button>
-
-              {/* Beta modes */}
-              <div className="flex gap-2">
-                <button onClick={() => setMode("smart")}
-                  className={`flex-1 py-2 rounded-lg text-xs font-medium transition-all flex items-center justify-center gap-1 ${
-                    mode === "smart"
-                      ? "bg-blue-600 text-white shadow-sm"
-                      : "bg-slate-800/40 text-slate-500 hover:text-slate-300"
-                  }`}>
-                  <Wand2 className="w-3 h-3" />Smart Fit
-                  <span className="text-[10px] opacity-60">β</span>
+              {AI_EDIT_ENABLED && (
+                <button
+                  onClick={() => setMode("ai-edit")}
+                  className={`relative flex-1 py-2.5 rounded-lg text-sm font-semibold transition-colors flex items-center justify-center gap-2 ${
+                    mode === "ai-edit" ? "text-white" : "text-slate-400 hover:text-slate-300"
+                  }`}
+                >
+                  <Sparkles className="w-4 h-4" />
+                  AI Edit
                 </button>
-                {AI_EDIT_ENABLED && (
-                  <button onClick={() => setMode("ai-edit")}
-                    className={`flex-1 py-2 rounded-lg text-xs font-medium transition-all flex items-center justify-center gap-1 ${
-                      mode === "ai-edit"
-                        ? "bg-violet-600 text-white shadow-sm"
-                        : "bg-slate-800/40 text-slate-500 hover:text-slate-300"
-                    }`}>
-                    <Sparkles className="w-3 h-3" />AI Edit
-                    <span className="text-[10px] opacity-60">β</span>
-                  </button>
-                )}
-              </div>
+              )}
             </div>
 
             {/* Step 1 — Upload */}
             <div className="space-y-3">
-              <span className="text-sm font-semibold text-slate-300 uppercase tracking-wider">Step 1</span>
-              <button onClick={() => fileInputRef.current?.click()}
-                className="w-full flex items-center justify-center gap-2 py-4 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-xl transition-all font-medium">
-                <Upload className="w-5 h-5" />
+              <span className="text-xs font-bold text-slate-400 uppercase tracking-widest">Step 1 · Photo</span>
+              <button
+                onClick={() => fileInputRef.current?.click()}
+                className="w-full flex items-center justify-center gap-2 py-3.5 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-xl transition-all font-medium"
+              >
+                <Upload className="w-4 h-4" />
                 {userImage ? "Replace Image" : "Upload Image"}
               </button>
             </div>
 
             {/* Hat Direction */}
             <div className="space-y-2">
-              <span className="text-xs font-semibold text-slate-400 uppercase tracking-widest">Hat Direction</span>
+              <span className="text-xs font-bold text-slate-400 uppercase tracking-widest">Hat Direction</span>
               <div className="flex gap-2">
                 {(["left", "right"] as const).map((d) => (
-                  <button key={d} onClick={() => setDirection(d)}
-                    className={`flex-1 py-2 rounded-lg text-sm font-medium transition-all ${
-                      direction === d ? "bg-slate-700 text-white" : "bg-slate-800/50 text-slate-500 hover:text-slate-300"
-                    }`}>
+                  <button
+                    key={d}
+                    onClick={() => setDirection(d)}
+                    className={`flex-1 py-2.5 rounded-xl text-sm font-medium transition-all ${
+                      direction === d
+                        ? "bg-slate-700 text-white border border-slate-600"
+                        : "bg-slate-800/40 text-slate-500 hover:text-slate-300 border border-transparent"
+                    }`}
+                  >
                     {d === "left" ? "\u2190 Left" : "Right \u2192"}
                   </button>
                 ))}
               </div>
             </div>
 
-            {/* ── Mode-specific Step 2 ──────────────────────────── */}
-            <div className="space-y-4 pt-4 border-t border-slate-800">
-
-              {mode === "ai-edit" && (
+            {/* Step 2 — Mode-specific */}
+            <div className="space-y-4 pt-5 border-t border-slate-800">
+              {mode === "ai-edit" ? (
                 <>
-                  <span className="text-sm font-semibold text-slate-300 uppercase tracking-wider">
-                    Step 2 &mdash; Generate
-                  </span>
-                  <button disabled={!isReady || aiEditStatus === "loading"}
+                  <span className="text-xs font-bold text-slate-400 uppercase tracking-widest">Step 2 · Generate</span>
+                  <button
+                    disabled={!isReady || aiEditStatus === "loading"}
                     onClick={handleAIEdit}
-                    className="w-full flex items-center justify-center gap-2 py-4 bg-violet-600/20 hover:bg-violet-600/30 border border-violet-500/30 text-violet-300 rounded-xl transition-all font-medium disabled:opacity-50 disabled:cursor-not-allowed">
+                    className="w-full flex items-center justify-center gap-2 py-4 bg-gradient-to-r from-blue-600 to-violet-600 hover:from-blue-500 hover:to-violet-500 text-white rounded-xl transition-all font-bold shadow-lg shadow-violet-900/30 disabled:opacity-50 disabled:cursor-not-allowed disabled:shadow-none"
+                  >
                     {aiEditStatus === "loading" ? (
                       <><Loader2 className="w-4 h-4 animate-spin" />Generating&hellip;</>
                     ) : (
                       <><Sparkles className="w-4 h-4" />{aiEditStatus === "done" ? "Regenerate" : "Generate AI Edit"}</>
                     )}
                   </button>
+
+                  {aiEditStatus === "loading" && (
+                    <p className="text-xs text-slate-500 text-center">
+                      This may take 10–20 seconds&hellip;
+                    </p>
+                  )}
                   {aiEditStatus === "done" && (
                     <p className="text-xs text-emerald-400/70 text-center">
                       AI edit applied. Download below or regenerate.
@@ -455,76 +396,58 @@ export default function UploadTool() {
                       <p className="text-xs text-amber-400/80 text-center">
                         {aiEditError ?? "Generation failed."}
                       </p>
-                      <button onClick={() => setMode("smart")}
-                        className="w-full py-2 text-xs text-blue-400 hover:text-blue-300 transition-colors text-center">
-                        Switch to Smart Fit instead
+                      <button
+                        onClick={() => setMode("classic")}
+                        className="w-full py-2 text-xs text-slate-400 hover:text-slate-200 transition-colors"
+                      >
+                        Switch to Classic instead
                       </button>
                     </div>
                   )}
-                  {aiEditStatus === "loading" && (
-                    <p className="text-xs text-slate-500 text-center">
-                      This may take 10–20 seconds&hellip;
-                    </p>
-                  )}
                 </>
-              )}
-
-              {mode === "smart" && (
+              ) : (
                 <>
-                  <span className="text-sm font-semibold text-slate-300 uppercase tracking-wider">
-                    Step 2 &mdash; Adjust
-                  </span>
-                  <div className="space-y-2">
-                    <button disabled={!isReady || smartStatus === "loading"}
-                      onClick={handleSmartFit}
-                      className="w-full flex items-center justify-center gap-2 py-3 bg-blue-600/20 hover:bg-blue-600/30 border border-blue-500/30 text-blue-400 rounded-xl transition-all font-medium disabled:opacity-50 disabled:cursor-not-allowed">
-                      {smartStatus === "loading"
-                        ? <><Loader2 className="w-4 h-4 animate-spin" />Detecting&hellip;</>
-                        : <><Wand2 className="w-4 h-4" />{smartStatus === "done" ? "Re-detect & Fit" : "Auto-fit Hat"}</>}
-                    </button>
-                    {smartMsg && <p className={`text-xs text-center ${smartMsg.c}`}>{smartMsg.t}</p>}
+                  <span className="text-xs font-bold text-slate-400 uppercase tracking-widest">Step 2 · Adjust</span>
+
+                  <div className="space-y-4">
+                    <p className="text-[10px] font-bold text-blue-400 uppercase tracking-[0.2em]">Photo</p>
+                    {PHOTO_SLIDERS.map((s) => (
+                      <SliderRow key={`p-${s.key}`} cfg={s}
+                        value={photo[s.key as keyof PhotoTransform]}
+                        disabled={!isReady} onChange={(v) => updatePhoto(s.key, v)} />
+                    ))}
                   </div>
-                </>
-              )}
 
-              {mode === "classic" && (
-                <span className="text-sm font-semibold text-slate-300 uppercase tracking-wider">
-                  Step 2 &mdash; Adjust
-                </span>
-              )}
-
-              {mode !== "ai-edit" && (
-                <>
-                  <p className="text-xs font-semibold text-blue-400 uppercase tracking-widest">Photo</p>
-                  {PHOTO_SLIDERS.map((s) => (
-                    <SliderRow key={`p-${s.key}`} cfg={s}
-                      value={photo[s.key as keyof PhotoTransform]}
-                      disabled={!isReady} onChange={(v) => updatePhoto(s.key, v)} />
-                  ))}
-                  <p className="text-xs font-semibold text-blue-400 uppercase tracking-widest pt-2">Hat</p>
-                  {HAT_SLIDERS.map((s) => (
-                    <SliderRow key={`h-${s.key}`} cfg={s}
-                      value={hat[s.key as keyof HatTransform]}
-                      disabled={!isReady} onChange={(v) => updateHat(s.key, v)} />
-                  ))}
+                  <div className="space-y-4 pt-2">
+                    <p className="text-[10px] font-bold text-blue-400 uppercase tracking-[0.2em]">Hat</p>
+                    {HAT_SLIDERS.map((s) => (
+                      <SliderRow key={`h-${s.key}`} cfg={s}
+                        value={hat[s.key as keyof HatTransform]}
+                        disabled={!isReady} onChange={(v) => updateHat(s.key, v)} />
+                    ))}
+                  </div>
                 </>
               )}
             </div>
 
             {/* Step 3 — Download */}
-            <div className="space-y-3 pt-4 border-t border-slate-800">
-              <span className="text-sm font-semibold text-slate-300 uppercase tracking-wider">Step 3</span>
-              <button disabled={!isReady}
+            <div className="space-y-3 pt-5 border-t border-slate-800">
+              <span className="text-xs font-bold text-slate-400 uppercase tracking-widest">Step 3 · Export</span>
+              <button
+                disabled={!isReady}
                 onClick={handleDownload}
-                className="w-full flex items-center justify-center gap-2 py-4 bg-blue-600 hover:bg-blue-500 text-white rounded-xl transition-all font-bold shadow-[0_0_15px_rgba(37,99,235,0.3)] disabled:opacity-50 disabled:shadow-none disabled:cursor-not-allowed">
-                <Download className="w-5 h-5" />Download PNG
+                className="w-full flex items-center justify-center gap-2 py-4 bg-blue-600 hover:bg-blue-500 text-white rounded-xl transition-all font-bold shadow-[0_0_20px_rgba(37,99,235,0.35)] disabled:opacity-50 disabled:shadow-none disabled:cursor-not-allowed"
+              >
+                <Download className="w-4 h-4" />Download PNG
               </button>
             </div>
 
             {userImage && (
-              <button onClick={handleReset}
-                className="w-full flex items-center justify-center gap-2 py-2 text-sm text-slate-500 hover:text-slate-300 transition-colors">
-                <RotateCcw className="w-4 h-4" />Reset / Try Another Photo
+              <button
+                onClick={handleReset}
+                className="w-full flex items-center justify-center gap-2 py-2 text-xs text-slate-500 hover:text-slate-300 transition-colors"
+              >
+                <RotateCcw className="w-3.5 h-3.5" />Reset / Try Another Photo
               </button>
             )}
           </div>
